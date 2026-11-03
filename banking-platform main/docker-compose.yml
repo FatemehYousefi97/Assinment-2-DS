@@ -1,0 +1,112 @@
+x-common: &common
+  build: .
+  environment: &app-env
+    INTERNAL_TOKEN: ${INTERNAL_TOKEN:?Set INTERNAL_TOKEN in .env}
+    SHARD_MAP_PATH: /srv/config/shards.json
+  networks: [bank-net]
+
+x-bank: &bank
+  <<: *common
+  command: ["uvicorn", "app.shard:app", "--host", "0.0.0.0", "--port", "8000"]
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+    interval: 3s
+    timeout: 3s
+    retries: 8
+  restart: "no"
+
+x-postgres: &postgres
+  image: postgres:16-alpine
+  environment: &pg-env
+    POSTGRES_USER: banking
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    POSTGRES_DB: banking
+  command: ["postgres", "-c", "max_prepared_transactions=100", "-c", "max_connections=120"]
+  networks: [bank-net]
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U banking -d banking"]
+    interval: 3s
+    timeout: 3s
+    retries: 20
+  restart: "no"
+
+services:
+  db-a:
+    <<: *postgres
+    volumes: ["db-a-data:/var/lib/postgresql/data", "./db/shard.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro"]
+  db-b:
+    <<: *postgres
+    volumes: ["db-b-data:/var/lib/postgresql/data", "./db/shard.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro"]
+  db-coordinator:
+    <<: *postgres
+    volumes: ["db-coordinator-data:/var/lib/postgresql/data", "./db/coordinator.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro"]
+
+  bank-a1:
+    <<: *bank
+    environment: {<<: *app-env, SHARD_NAME: A, REPLICA_ID: A1, ENABLE_FAULT_INJECTION: "${ENABLE_FAULT_INJECTION:-false}", DATABASE_URL: "postgresql://banking:${POSTGRES_PASSWORD}@db-a:5432/banking"}
+    depends_on: {db-a: {condition: service_healthy}}
+  bank-a2:
+    <<: *bank
+    environment: {<<: *app-env, SHARD_NAME: A, REPLICA_ID: A2, ENABLE_FAULT_INJECTION: "${ENABLE_FAULT_INJECTION:-false}", DATABASE_URL: "postgresql://banking:${POSTGRES_PASSWORD}@db-a:5432/banking"}
+    depends_on: {db-a: {condition: service_healthy}}
+  bank-b1:
+    <<: *bank
+    environment: {<<: *app-env, SHARD_NAME: B, REPLICA_ID: B1, ENABLE_FAULT_INJECTION: "${ENABLE_FAULT_INJECTION:-false}", DATABASE_URL: "postgresql://banking:${POSTGRES_PASSWORD}@db-b:5432/banking"}
+    depends_on: {db-b: {condition: service_healthy}}
+  bank-b2:
+    <<: *bank
+    environment: {<<: *app-env, SHARD_NAME: B, REPLICA_ID: B2, ENABLE_FAULT_INJECTION: "${ENABLE_FAULT_INJECTION:-false}", DATABASE_URL: "postgresql://banking:${POSTGRES_PASSWORD}@db-b:5432/banking"}
+    depends_on: {db-b: {condition: service_healthy}}
+
+  coordinator:
+    <<: *common
+    command: ["uvicorn", "app.coordinator:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      <<: *app-env
+      DATABASE_URL: "postgresql://banking:${POSTGRES_PASSWORD}@db-coordinator:5432/banking"
+      ENABLE_FAULT_INJECTION: ${ENABLE_FAULT_INJECTION:-false}
+    depends_on:
+      db-coordinator: {condition: service_healthy}
+      bank-a1: {condition: service_healthy}
+      bank-b1: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 3s
+      timeout: 3s
+      retries: 8
+    restart: "no"
+
+  gateway:
+    <<: *common
+    command: ["uvicorn", "app.gateway:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports: ["127.0.0.1:8080:8000"]
+    environment:
+      <<: *app-env
+      COORDINATOR_URL: http://coordinator:8000
+    depends_on:
+      coordinator: {condition: service_healthy}
+    restart: "no"
+
+  test-runner:
+    <<: *common
+    profiles: ["test"]
+    command: ["pytest", "-v", "tests/integration"]
+    environment:
+      <<: *app-env
+      # Runtime UID 10001 cannot write /srv/.pytest_cache. Disable only the
+      # optional pytest cache plugin; the test assertions remain unchanged.
+      PYTEST_ADDOPTS: "-p no:cacheprovider"
+      GATEWAY_URL: http://gateway:8000
+      DB_A_URL: "postgresql://banking:${POSTGRES_PASSWORD}@db-a:5432/banking"
+      DB_B_URL: "postgresql://banking:${POSTGRES_PASSWORD}@db-b:5432/banking"
+      COORD_DB_URL: "postgresql://banking:${POSTGRES_PASSWORD}@db-coordinator:5432/banking"
+    depends_on: {gateway: {condition: service_started}}
+
+networks:
+  bank-net:
+    driver: bridge
+volumes:
+  db-a-data:
+  db-b-data:
+  db-coordinator-data:
+

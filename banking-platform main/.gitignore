@@ -1,0 +1,13 @@
+.env
+__pycache__/
+.pytest_cache/
+.venv/
+*.pyc
+*.log
+*.backup
+*.before_*
+tmp/
+results/*.json
+results/*.txt
+!results/.gitkeep
+

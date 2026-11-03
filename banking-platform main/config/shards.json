@@ -1,0 +1,7 @@
+{
+  "shards": [
+    {"name": "A", "start": 1, "end": 1000, "replicas": ["http://bank-a1:8000", "http://bank-a2:8000"]},
+    {"name": "B", "start": 1001, "end": 2000, "replicas": ["http://bank-b1:8000", "http://bank-b2:8000"]}
+  ]
+}
+
